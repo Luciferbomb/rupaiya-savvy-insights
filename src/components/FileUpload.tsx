@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
-import { Download, FileUp, IndianRupee } from "lucide-react";
+import { Download, FileUp, IndianRupee, AlertCircle } from "lucide-react";
 import { processPdfStatement, isPdfFile } from '@/utils/pdfUtils';
 import { Transaction } from '@/types';
 
@@ -16,6 +16,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onTransactionsLoaded, onUseMock
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [fileName, setFileName] = useState<string | null>(null);
+  const [processingError, setProcessingError] = useState<string | null>(null);
   const { toast } = useToast();
 
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
@@ -57,23 +58,34 @@ const FileUpload: React.FC<FileUploadProps> = ({ onTransactionsLoaded, onUseMock
 
     setFileName(file.name);
     setIsProcessing(true);
+    setProcessingError(null);
 
     try {
+      console.log(`Starting to process file: ${file.name}`);
       const transactions = await processPdfStatement(file);
       
-      toast({
-        title: "File processed successfully",
-        description: `Extracted ${transactions.length} transactions from ${file.name}`,
-      });
-
-      onTransactionsLoaded(transactions);
+      if (transactions.length === 0) {
+        setProcessingError("No transactions could be extracted from this statement. Please try a different statement or use sample data.");
+        toast({
+          title: "No transactions found",
+          description: "The parser couldn't extract any transactions from your statement.",
+          variant: "destructive"
+        });
+      } else {
+        toast({
+          title: "File processed successfully",
+          description: `Extracted ${transactions.length} transactions from ${file.name}`,
+        });
+        onTransactionsLoaded(transactions);
+      }
     } catch (error) {
+      console.error("Error processing file:", error);
+      setProcessingError((error as Error).message || "Unknown processing error");
       toast({
         title: "Error processing file",
         description: "There was an error processing your bank statement",
         variant: "destructive"
       });
-      console.error("Error processing file:", error);
     } finally {
       setIsProcessing(false);
     }
@@ -98,7 +110,6 @@ const FileUpload: React.FC<FileUploadProps> = ({ onTransactionsLoaded, onUseMock
             accept=".pdf" 
             onChange={handleFileInputChange}
           />
-          <FileUp className="mx-auto h-12 w-12 text-rupaiya-purple mb-4" />
           
           {isProcessing ? (
             <div className="space-y-3">
@@ -107,8 +118,16 @@ const FileUpload: React.FC<FileUploadProps> = ({ onTransactionsLoaded, onUseMock
                 <div className="h-full bg-rupaiya-purple animate-pulse rounded-full"></div>
               </div>
             </div>
+          ) : processingError ? (
+            <div className="space-y-4">
+              <AlertCircle className="mx-auto h-12 w-12 text-red-500 mb-2" />
+              <h3 className="text-lg font-semibold text-red-600">Processing Error</h3>
+              <p className="text-gray-600 mb-4">{processingError}</p>
+              <p className="text-sm text-gray-500">Try uploading again or use sample data below</p>
+            </div>
           ) : (
             <>
+              <FileUp className="mx-auto h-12 w-12 text-rupaiya-purple mb-4" />
               <h3 className="text-lg font-semibold mb-2">Upload Bank Statement</h3>
               <p className="text-gray-500 mb-4">Drag and drop your PDF bank statement here or click to browse</p>
               <div className="flex items-center justify-center space-x-2 text-sm text-gray-400">

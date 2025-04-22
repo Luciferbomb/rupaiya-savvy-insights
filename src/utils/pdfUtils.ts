@@ -7,167 +7,177 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs
 
 // Enhanced utility to parse Axis Bank statement transaction rows from text lines
 function parseAxisBankTransactions(text: string): Transaction[] {
-  console.log('Raw PDF text:', text); // Logging for debugging
-
+  console.log('Raw PDF text:', text.substring(0, 1000) + '...'); // Log first 1000 chars for debugging
+  
+  // Preprocessing: fix common OCR issues
+  text = text.replace(/\s+/g, ' ').trim(); // Normalize whitespace
+  
   const lines = text.split('\n')
     .map(line => line.trim())
     .filter(line => line.length > 0);
+  
+  console.log(`Total lines in PDF: ${lines.length}`);
   
   // Array to store parsed transactions
   const transactions: Transaction[] = [];
   let idCounter = 0;
   
-  // Find the transaction table start - Look for header row with key column names
-  const headerKeywords = ['Transaction Date', 'Particulars', 'Debit', 'Credit', 'Balance'];
-  const startIdx = lines.findIndex(line => {
-    // Check if at least 3 of the keywords are present to accommodate for varied header formats
-    return headerKeywords.filter(keyword => line.includes(keyword)).length >= 3;
-  });
-  
-  console.log('Table starts at line index:', startIdx);
-
-  if (startIdx === -1) {
-    console.warn('Could not locate transaction table header. Falling back to date pattern matching.');
-  }
-
-  // Indian date format pattern: DD-MM-YYYY
+  // Find transaction table by looking for date patterns
   const datePattern = /(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})/;
   
-  // Parse transactions from the identified table rows
-  for (let i = (startIdx !== -1 ? startIdx + 1 : 0); i < lines.length; i++) {
+  // Try to identify transaction rows by date pattern
+  for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    console.log('Processing line:', line);
-    
-    // Axis Bank transactions typically start with a date in DD-MM-YYYY format
     const dateMatch = line.match(datePattern);
     
     if (dateMatch) {
-      // Extract the date
-      const dateStr = dateMatch[0];
+      console.log('Potential transaction row found:', line);
       
-      // Format the date for consistency (YYYY-MM-DD)
-      const day = dateMatch[1].padStart(2, '0');
-      const month = dateMatch[2].padStart(2, '0');
-      const year = dateMatch[3].length === 2 ? `20${dateMatch[3]}` : dateMatch[3];
-      const formattedDate = `${year}-${month}-${day}`;
-      
-      // Extract description - after the date and before amounts
-      // Remove the date from the line
-      let remainingText = line.replace(dateStr, '').trim();
-      
-      // Look for Cheque Number (skip if present)
-      const chequePattern = /^\d{6,}/;
-      if (chequePattern.test(remainingText.split(/\s+/)[0])) {
-        // Remove cheque number
-        remainingText = remainingText.replace(/^\d{6,}\s+/, '');
-      }
-      
-      // Extract amount patterns
-      // Accommodate both formats: with commas (1,234.56) and without (1234.56)
-      const amountPattern = /[\d,.]+\.\d{2}/g;
-      const amountMatches = [...remainingText.matchAll(amountPattern)];
-      
-      if (amountMatches.length >= 1) {
+      try {
+        // Extract the date
+        const dateStr = dateMatch[0];
+        
+        // Format the date for consistency (YYYY-MM-DD)
+        const day = dateMatch[1].padStart(2, '0');
+        const month = dateMatch[2].padStart(2, '0');
+        const year = dateMatch[3].length === 2 ? `20${dateMatch[3]}` : dateMatch[3];
+        const formattedDate = `${year}-${month}-${day}`;
+        
+        // Remove the date from the line to get the rest of the information
+        let remainingText = line.replace(dateStr, '').trim();
+        
+        // Handle the case where there might be a cheque number
+        if (/^\d{6,}/.test(remainingText.split(' ')[0])) {
+          remainingText = remainingText.replace(/^\d{6,}\s+/, '');
+        }
+        
+        // Extract numbers that could be amounts (look for currency patterns)
+        const amountPattern = /([\d,]+\.\d{2})/g;
+        const amounts = [];
+        let amount = 0;
+        let isCredit = false;
+        let match;
+        
+        while ((match = amountPattern.exec(remainingText)) !== null) {
+          const amountStr = match[0].replace(/,/g, '');
+          amounts.push({
+            value: parseFloat(amountStr),
+            position: match.index
+          });
+        }
+        
         // Extract description (everything before the first amount)
-        const firstAmountIndex = remainingText.indexOf(amountMatches[0][0]);
-        let description = remainingText.substring(0, firstAmountIndex).trim();
+        let description = '';
+        if (amounts.length > 0) {
+          const firstAmountPos = amounts[0].position;
+          description = remainingText.substring(0, firstAmountPos).trim();
+          
+          // Determine if it's a debit or credit transaction
+          if (amounts.length >= 2) {
+            // First amount is usually debit, second is credit, third is balance
+            if (amounts[0].value > 0) {
+              amount = -amounts[0].value; // Debit (negative)
+            } else if (amounts[1].value > 0) {
+              amount = amounts[1].value; // Credit (positive)
+              isCredit = true;
+            }
+          } else if (amounts.length === 1) {
+            // If there's only one amount, check the context
+            if (remainingText.toLowerCase().includes('debit') || 
+                remainingText.toLowerCase().includes('withdrawal') ||
+                remainingText.toLowerCase().includes('payment')) {
+              amount = -amounts[0].value; // Likely a debit
+            } else {
+              amount = amounts[0].value; // Assume credit
+              isCredit = true;
+            }
+          }
+        } else {
+          // If no amounts found, just use the remaining text as description
+          description = remainingText;
+          console.log('No amounts found in transaction line');
+        }
         
         // Clean up description
         description = description.replace(/\s+/g, ' ').trim();
-        description = description || 'Unnamed Transaction';
         
-        // Extract amounts
-        // In Axis bank format, we might have Debit, Credit, and Balance columns
-        // First check if it's a debit or credit transaction
-        let amount = 0;
-        let isCredit = false;
-        
-        // If we have at least two amount matches, the first is either debit or credit
-        if (amountMatches.length >= 2) {
-          // Check if the first amount slot has a value
-          const amountStr = amountMatches[0][0].replace(/[,₹\s]/g, '');
-          const nextAmountStr = amountMatches[1][0].replace(/[,₹\s]/g, '');
-          
-          // Determine if this is a debit or credit transaction
-          // For Axis Bank: first column with value is debit, second is credit
-          // Look at the positions to determine which one has a value
-          const debitPos = remainingText.indexOf(amountMatches[0][0]);
-          const creditPos = remainingText.indexOf(amountMatches[1][0]);
-          
-          const debitValue = parseFloat(amountStr);
-          const creditValue = parseFloat(nextAmountStr);
-          
-          // If the first number is closer to the start and has a value, it's debit
-          // Otherwise, it's credit
-          if (!isNaN(debitValue) && debitPos < creditPos) {
-            amount = debitValue;
-            isCredit = false;
-          } else if (!isNaN(creditValue)) {
-            amount = creditValue;
-            isCredit = true;
-          }
-        } else if (amountMatches.length === 1) {
-          // Only one amount found, assume it's a running balance and skip
-          console.log('Skipping line with only balance amount:', line);
-          continue;
-        }
-        
-        // Normalize merchant name from description
+        // Extract merchant from UPI/IMPS transaction descriptions
         let merchant = "";
-        
-        // Extract merchant from UPI patterns
-        if (description.includes('UPI/P2M/') || description.includes('UPI/P2A/')) {
-          const upiParts = description.split('/');
-          // Try to get the merchant name from the UPI string
-          for (let j = 0; j < upiParts.length; j++) {
-            if (upiParts[j].includes('ZOMATO') || 
-                upiParts[j].includes('ZEPTO') || 
-                upiParts[j].includes('BLINKIT') ||
-                upiParts[j].toUpperCase() !== upiParts[j]) { // Likely a merchant name if not all caps
-              merchant = upiParts[j];
-              break;
+        if (description.includes('UPI')) {
+          // Look for UPI-specific patterns
+          const upiMatch = description.match(/UPI\/(P2M|P2A|P2P)\/([^\/]+)/);
+          if (upiMatch) {
+            const upiParts = description.split('/');
+            for (const part of upiParts) {
+              if (part.includes('ZOMATO') || 
+                  part.includes('ZEPTO') || 
+                  part.includes('BLINKIT') ||
+                  part.toUpperCase() !== part) { // Likely a merchant name if not all caps
+                merchant = part;
+                break;
+              }
             }
           }
-        } else if (description.includes('IMPS/P2A/')) {
+        } else if (description.includes('IMPS')) {
+          // Look for IMPS-specific patterns
           const impsParts = description.split('/');
-          // For IMPS, try to extract recipient name
-          for (let j = 0; j < impsParts.length; j++) {
-            if (impsParts[j].includes(' ') && impsParts[j].toUpperCase() !== impsParts[j]) {
-              merchant = impsParts[j];
+          for (const part of impsParts) {
+            if (part.includes(' ') && part.toUpperCase() !== part) {
+              merchant = part;
               break;
             }
           }
         }
         
-        // If no merchant found, use first 3 words or less
+        // If no merchant found, extract from description
         if (!merchant) {
-          merchant = description.split(' ').slice(0, 3).join(' ');
+          // Try to find a name-like sequence (words with capital letters)
+          const namePattern = /[A-Z][a-z]+ [A-Z][a-z]+/;
+          const nameMatch = description.match(namePattern);
+          if (nameMatch) {
+            merchant = nameMatch[0];
+          } else {
+            // Fall back to first few words
+            merchant = description.split(' ').slice(0, 3).join(' ');
+          }
         }
         
-        // Create transaction object
-        const transaction: Transaction = {
-          id: `axis-trans-${idCounter++}`,
-          date: formattedDate,
-          description: description,
-          // For credits, store positive amount; for debits, store negative amount
-          amount: isCredit ? amount : -amount,
-          merchant: merchant,
-          category: categorizeTransaction(description)
-        };
-        
-        console.log('Extracted transaction:', transaction);
-        transactions.push(transaction);
+        // Only create transaction if we have a meaningful amount
+        if (amount !== 0 || description) {
+          const transaction: Transaction = {
+            id: `trans-${idCounter++}`,
+            date: formattedDate,
+            description: description || 'Unnamed Transaction',
+            amount: amount,
+            merchant: merchant || 'Unknown Merchant',
+            category: categorizeTransaction(description)
+          };
+          
+          console.log('Extracted transaction:', transaction);
+          transactions.push(transaction);
+        }
+      } catch (err) {
+        console.error('Error parsing transaction line:', line, err);
       }
     }
   }
   
   console.log(`Total transactions extracted: ${transactions.length}`);
   
-  // Sort transactions by date (oldest first)
-  return transactions.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  // Sort transactions by date (oldest first) and ensure proper debit/credit sign
+  return transactions
+    .map(transaction => ({
+      ...transaction,
+      // Make sure debits are negative and credits are positive
+      amount: transaction.description.toLowerCase().includes('debit') || 
+              transaction.description.toLowerCase().includes('payment to') || 
+              transaction.description.toLowerCase().includes('withdrawal') ? 
+              -Math.abs(transaction.amount) : transaction.amount
+    }))
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 }
 
-// Enhanced utility to parse any bank statement transaction rows
+// Fallback generic parser function (keep as backup)
 function parseGenericBankTransactions(text: string): Transaction[] {
   console.log('Parsing with generic bank statement parser');
   
@@ -239,42 +249,75 @@ export const processPdfStatement = async (file: File): Promise<Transaction[]> =>
     // Read the PDF file as an ArrayBuffer
     const fileData = await file.arrayBuffer();
     
-    // Load the PDF document
-    const loadingTask = pdfjsLib.getDocument({ data: fileData });
+    // Load the PDF document with enhanced options
+    const loadingTask = pdfjsLib.getDocument({
+      data: fileData,
+      disableFontFace: true, // Might help with text extraction
+      nativeImageDecoderSupport: 'display' // Better image handling
+    });
+    
     const pdf = await loadingTask.promise;
+    console.log(`PDF loaded successfully. Pages: ${pdf.numPages}`);
     
     // Extract text from all pages with improved text extraction
     let textContent = '';
     
     for (let i = 1; i <= pdf.numPages; i++) {
+      console.log(`Processing page ${i} of ${pdf.numPages}`);
       const page = await pdf.getPage(i);
-      const content = await page.getTextContent();
-      const pageText = content.items
-        .map((item: any) => item.str)
-        .filter((str: string) => str.trim().length > 0)
-        .join(' ');
-      textContent += pageText + '\n';
+      
+      // Get text with more granular options
+      const content = await page.getTextContent({
+        normalizeWhitespace: false,
+        disableCombineTextItems: false
+      });
+      
+      // Build text content with position awareness
+      const items = content.items as any[];
+      items.sort((a, b) => {
+        // Sort by vertical position first (rows)
+        if (Math.abs(a.transform[5] - b.transform[5]) > 5) {
+          return b.transform[5] - a.transform[5]; // Higher y-value first
+        }
+        // If on same line, sort by horizontal position (columns)
+        return a.transform[4] - b.transform[4];
+      });
+      
+      let lastY = 0;
+      for (const item of items) {
+        // Add newline if significant y-position change
+        if (lastY !== 0 && Math.abs(lastY - item.transform[5]) > 5) {
+          textContent += '\n';
+        }
+        textContent += item.str + ' ';
+        lastY = item.transform[5];
+      }
+      textContent += '\n';
     }
     
-    // First try Axis Bank specific parser
+    console.log('Text extraction complete. Parsing transactions...');
+    
+    // Try the Axis Bank specific parser first
     let transactions = parseAxisBankTransactions(textContent);
     
-    // If Axis Bank parser didn't find any transactions, try the generic parser
-    if (transactions.length === 0) {
-      console.log('Axis Bank parser found no transactions, trying generic parser');
+    // If Axis Bank parser didn't find enough transactions, try the generic parser
+    if (transactions.length < 2) {
+      console.log('Axis Bank parser found too few transactions, trying generic parser');
       transactions = parseGenericBankTransactions(textContent);
-    }
-
-    if (transactions.length === 0) {
-      console.warn("No structured transactions found in PDF text. Consider enhancing the parsing algorithm or implementing OCR.");
     }
 
     // Post-process: sort by date descending for display
     transactions = transactions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    
+    if (transactions.length === 0) {
+      console.warn("No transactions found. Raw text sample:", textContent.substring(0, 500));
+      throw new Error("No transactions found in the PDF. The statement format may not be supported.");
+    }
+    
     return transactions;
   } catch (error) {
     console.error("Failed to extract data from PDF:", error);
-    throw new Error("Unable to process PDF file. Please check if the file is accessible and properly formatted.");
+    throw error;
   }
 };
 
