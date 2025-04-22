@@ -51,98 +51,182 @@ function parseAxisBankTransactions(text: string): Transaction[] {
           remainingText = remainingText.replace(/^\d{6,}\s+/, '');
         }
         
-        // Extract numbers that could be amounts (look for currency patterns)
+        // Modified approach for Axis Bank pattern - looking for distinct numeric amounts
+        // Axis format typically has distinct numeric columns for debit, credit, and balance
+        
+        // Find all numbers that look like currency amounts
         const amountPattern = /([\d,]+\.\d{2})/g;
-        const amounts = [];
-        let amount = 0;
-        let isCredit = false;
+        let amountMatches = [];
         let match;
         
         while ((match = amountPattern.exec(remainingText)) !== null) {
-          const amountStr = match[0].replace(/,/g, '');
-          amounts.push({
-            value: parseFloat(amountStr),
-            position: match.index
+          amountMatches.push({
+            value: parseFloat(match[0].replace(/,/g, '')),
+            position: match.index,
+            raw: match[0]
           });
         }
         
-        // Extract description (everything before the first amount)
-        let description = '';
-        if (amounts.length > 0) {
-          const firstAmountPos = amounts[0].position;
-          description = remainingText.substring(0, firstAmountPos).trim();
+        // Sort by position (left to right)
+        amountMatches.sort((a, b) => a.position - b.position);
+        
+        console.log(`Found ${amountMatches.length} potential amounts:`, amountMatches);
+        
+        let amount = 0;
+        let description = remainingText;
+        let isCredit = false;
+        
+        // Try to figure out which amounts are debit, credit, and balance
+        if (amountMatches.length >= 2) {
+          // Remove all amounts from description text
+          amountMatches.forEach(match => {
+            description = description.replace(match.raw, '');
+          });
           
-          // Determine if it's a debit or credit transaction
-          if (amounts.length >= 2) {
-            // First amount is usually debit, second is credit, third is balance
-            if (amounts[0].value > 0) {
-              amount = -amounts[0].value; // Debit (negative)
-            } else if (amounts[1].value > 0) {
-              amount = amounts[1].value; // Credit (positive)
-              isCredit = true;
+          // Extract transaction description before first amount
+          if (amountMatches.length > 0) {
+            const beforeFirstAmount = remainingText.substring(0, amountMatches[0].position);
+            description = beforeFirstAmount.trim();
+          }
+          
+          // Clean up description
+          description = description.replace(/\s+/g, ' ').trim();
+          
+          // Typically in Axis format:
+          // For debits: First amount is debit, second is balance
+          // For credits: First amount is credit, second is balance
+          
+          // Check if the line contains words that suggest a debit
+          const isDebitIndicator = (line.toLowerCase().includes('debit') || 
+              line.toLowerCase().includes('withdrawal') || 
+              line.toLowerCase().includes('payment') ||
+              line.toLowerCase().includes('atm') ||
+              line.toLowerCase().includes('upi/p2m'));
+          
+          // Check if the line contains words that suggest a credit
+          const isCreditIndicator = (line.toLowerCase().includes('credit') ||
+              line.toLowerCase().includes('deposit') ||
+              line.toLowerCase().includes('credit') ||
+              line.toLowerCase().includes('salary') ||
+              line.toLowerCase().includes('refund'));
+              
+          // For UPI, try to determine if it's debit or credit
+          if (line.toLowerCase().includes('upi')) {
+            if (line.toLowerCase().includes('upi/p2m')) {
+              // P2M usually means payment to merchant (debit)
+              amount = -Math.abs(amountMatches[0].value);
+            } else if (line.toLowerCase().includes('upi/p2a')) {
+              // Check context to determine direction
+              if (isDebitIndicator) {
+                amount = -Math.abs(amountMatches[0].value);
+              } else {
+                amount = Math.abs(amountMatches[0].value);
+                isCredit = true;
+              }
             }
-          } else if (amounts.length === 1) {
-            // If there's only one amount, check the context
-            if (remainingText.toLowerCase().includes('debit') || 
-                remainingText.toLowerCase().includes('withdrawal') ||
-                remainingText.toLowerCase().includes('payment')) {
-              amount = -amounts[0].value; // Likely a debit
-            } else {
-              amount = amounts[0].value; // Assume credit
-              isCredit = true;
+          } else if (isDebitIndicator) {
+            // This is likely a debit transaction
+            amount = -Math.abs(amountMatches[0].value);
+          } else if (isCreditIndicator) {
+            // This is likely a credit transaction
+            amount = Math.abs(amountMatches[0].value);
+            isCredit = true;
+          } else if (amountMatches.length >= 2) {
+            // If we have multiple amounts and no clear indicator, use position to determine
+            // First non-zero amount is usually the transaction amount
+            // Negative means debit, positive means credit
+            for (const match of amountMatches) {
+              if (match.value !== 0) {
+                amount = match.value;
+                break;
+              }
+            }
+            
+            // If amount is ambiguous, make educated guess based on transaction description
+            if (description.toLowerCase().includes('payment') || 
+                description.toLowerCase().includes('purchase') ||
+                description.toLowerCase().includes('withdrawal')) {
+              amount = -Math.abs(amount);
             }
           }
-        } else {
-          // If no amounts found, just use the remaining text as description
-          description = remainingText;
-          console.log('No amounts found in transaction line');
+        } else if (amountMatches.length === 1) {
+          // Only one amount found - use context to determine if debit or credit
+          amount = amountMatches[0].value;
+          
+          // Remove amount from description
+          description = remainingText.replace(amountMatches[0].raw, '').trim();
+          
+          // Determine if it's debit or credit based on context
+          if (description.toLowerCase().includes('debit') || 
+              description.toLowerCase().includes('payment') ||
+              description.toLowerCase().includes('purchase') ||
+              description.toLowerCase().includes('withdrawal') ||
+              description.toLowerCase().includes('dr')) {
+            amount = -Math.abs(amount);
+          } else if (description.toLowerCase().includes('credit') ||
+                    description.toLowerCase().includes('deposit') ||
+                    description.toLowerCase().includes('salary') ||
+                    description.toLowerCase().includes('cr')) {
+            isCredit = true;
+          }
         }
         
-        // Clean up description
-        description = description.replace(/\s+/g, ' ').trim();
-        
-        // Extract merchant from UPI/IMPS transaction descriptions
+        // Extract merchant name
         let merchant = "";
+        
+        // Try to extract merchant from UPI/IMPS descriptions
         if (description.includes('UPI')) {
-          // Look for UPI-specific patterns
-          const upiMatch = description.match(/UPI\/(P2M|P2A|P2P)\/([^\/]+)/);
-          if (upiMatch) {
-            const upiParts = description.split('/');
-            for (const part of upiParts) {
-              if (part.includes('ZOMATO') || 
-                  part.includes('ZEPTO') || 
-                  part.includes('BLINKIT') ||
-                  part.toUpperCase() !== part) { // Likely a merchant name if not all caps
+          const upiParts = description.split('/');
+          
+          // Look for specific merchant names in UPI string
+          for (const part of upiParts) {
+            if (part.includes('ZOMATO') || 
+                part.includes('ZEPTO') || 
+                part.includes('BLINKIT') ||
+                part.includes('AMAZON') ||
+                part.includes('SWIGGY') ||
+                part.includes('UBER') ||
+                part.toUpperCase() !== part) { 
+              merchant = part.trim();
+              break;
+            }
+          }
+          
+          // If no specific merchant found, try to extract from UPI format
+          if (!merchant && upiParts.length > 2) {
+            merchant = upiParts[2].trim(); // Often the third segment has the merchant
+          }
+        } else if (description.includes('IMPS')) {
+          // Handle IMPS transaction
+          const impsParts = description.split('/');
+          
+          // Often the third or fourth segment contains recipient name
+          if (impsParts.length > 3) {
+            for (let i = 2; i < impsParts.length; i++) {
+              const part = impsParts[i].trim();
+              if (part && part.toUpperCase() !== part && part.length > 3) {
                 merchant = part;
                 break;
               }
             }
           }
-        } else if (description.includes('IMPS')) {
-          // Look for IMPS-specific patterns
-          const impsParts = description.split('/');
-          for (const part of impsParts) {
-            if (part.includes(' ') && part.toUpperCase() !== part) {
-              merchant = part;
-              break;
-            }
-          }
         }
         
-        // If no merchant found, extract from description
+        // If no merchant found from UPI/IMPS, try to extract from description
         if (!merchant) {
-          // Try to find a name-like sequence (words with capital letters)
+          // Try to find name-like patterns
           const namePattern = /[A-Z][a-z]+ [A-Z][a-z]+/;
           const nameMatch = description.match(namePattern);
+          
           if (nameMatch) {
             merchant = nameMatch[0];
           } else {
-            // Fall back to first few words
-            merchant = description.split(' ').slice(0, 3).join(' ');
+            // Use first part of description
+            merchant = description.split(' ').slice(0, 2).join(' ');
           }
         }
         
-        // Only create transaction if we have a meaningful amount
+        // Create transaction if we have a valid amount
         if (amount !== 0 || description) {
           const transaction: Transaction = {
             id: `trans-${idCounter++}`,
@@ -164,16 +248,8 @@ function parseAxisBankTransactions(text: string): Transaction[] {
   
   console.log(`Total transactions extracted: ${transactions.length}`);
   
-  // Sort transactions by date (oldest first) and ensure proper debit/credit sign
+  // Sort transactions by date (oldest first)
   return transactions
-    .map(transaction => ({
-      ...transaction,
-      // Make sure debits are negative and credits are positive
-      amount: transaction.description.toLowerCase().includes('debit') || 
-              transaction.description.toLowerCase().includes('payment to') || 
-              transaction.description.toLowerCase().includes('withdrawal') ? 
-              -Math.abs(transaction.amount) : transaction.amount
-    }))
     .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 }
 
@@ -249,28 +325,24 @@ export const processPdfStatement = async (file: File): Promise<Transaction[]> =>
     // Read the PDF file as an ArrayBuffer
     const fileData = await file.arrayBuffer();
     
-    // Load the PDF document with enhanced options
+    // Load the PDF document with compatibility options
     const loadingTask = pdfjsLib.getDocument({
       data: fileData,
-      disableFontFace: true, // Might help with text extraction
-      nativeImageDecoderSupport: 'display' // Better image handling
+      disableFontFace: true // Might help with text extraction
     });
     
     const pdf = await loadingTask.promise;
     console.log(`PDF loaded successfully. Pages: ${pdf.numPages}`);
     
-    // Extract text from all pages with improved text extraction
+    // Extract text from all pages
     let textContent = '';
     
     for (let i = 1; i <= pdf.numPages; i++) {
       console.log(`Processing page ${i} of ${pdf.numPages}`);
       const page = await pdf.getPage(i);
       
-      // Get text with more granular options
-      const content = await page.getTextContent({
-        normalizeWhitespace: false,
-        disableCombineTextItems: false
-      });
+      // Get text content
+      const content = await page.getTextContent();
       
       // Build text content with position awareness
       const items = content.items as any[];

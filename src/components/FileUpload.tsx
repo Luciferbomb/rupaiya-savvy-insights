@@ -72,6 +72,9 @@ const FileUpload: React.FC<FileUploadProps> = ({ onTransactionsLoaded, onUseMock
           variant: "destructive"
         });
       } else {
+        // Log sample transactions for debugging purposes
+        console.log("Sample transactions extracted:", transactions.slice(0, 3));
+        
         toast({
           title: "File processed successfully",
           description: `Extracted ${transactions.length} transactions from ${file.name}`,
