@@ -1,7 +1,10 @@
 
 import { Transaction } from '../types';
 import { categorizeTransaction } from './transactionUtils';
-import pdf from 'pdf-parse';
+import * as pdfjsLib from 'pdfjs-dist';
+
+// Set the worker source path for pdf.js
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
 // Utility to guess and parse transaction rows from text lines
 function parseTransactionsFromText(text: string): Transaction[] {
@@ -60,18 +63,28 @@ function parseTransactionsFromText(text: string): Transaction[] {
 export const processPdfStatement = async (file: File): Promise<Transaction[]> => {
   console.log(`Processing PDF file: ${file.name}`);
 
-  // Read PDF and extract raw text
   try {
-    const buffer = await file.arrayBuffer();
-    const data = await pdf(new Uint8Array(buffer));
-    const text = data.text;
-    let transactions = parseTransactionsFromText(text);
+    // Read the PDF file as an ArrayBuffer
+    const fileData = await file.arrayBuffer();
+    
+    // Load the PDF document
+    const loadingTask = pdfjsLib.getDocument({ data: fileData });
+    const pdf = await loadingTask.promise;
+    
+    // Extract text from all pages
+    let textContent = '';
+    
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const pageText = content.items.map((item: any) => item.str).join(' ');
+      textContent += pageText + '\n';
+    }
+    
+    let transactions = parseTransactionsFromText(textContent);
 
     if (transactions.length === 0) {
-      // Fallback: OCR stub for scanned PDF (to be replaced with real OCR library/server)
-      // NOTE: Actual OCR not available in-browser here, explain limitation to devs in code comments.
-      console.warn("No structured transactions found in PDF text. OCR required, but not implemented in browser.");
-      // For real OCR, integrate e.g. Tesseract.js or a backend API.
+      console.warn("No structured transactions found in PDF text. Consider enhancing the parsing algorithm or implementing OCR.");
     }
 
     // Post-process: sort by date descending
@@ -79,7 +92,7 @@ export const processPdfStatement = async (file: File): Promise<Transaction[]> =>
     return transactions;
   } catch (error) {
     console.error("Failed to extract data from PDF:", error);
-    throw new Error("Unable to process PDF file (parsing or OCR failed).");
+    throw new Error("Unable to process PDF file. Please check if the file is accessible and properly formatted.");
   }
 };
 
