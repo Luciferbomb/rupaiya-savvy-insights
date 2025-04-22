@@ -1,11 +1,10 @@
-
 import React, { useState } from 'react';
 import { Transaction } from '@/types';
 import FileUpload from '@/components/FileUpload';
 import TransactionAnalysis from '@/components/TransactionAnalysis';
 import { generateMockTransactions } from '@/utils/transactionUtils';
 import { Badge } from '@/components/ui/badge';
-import { BadgeIndianRupee, BookOpen } from 'lucide-react';
+import { BadgeIndianRupee, BookOpen, FileUp, ChartPie } from 'lucide-react';
 
 const Index: React.FC = () => {
   const [transactions, setTransactions] = useState<Transaction[]>([]);

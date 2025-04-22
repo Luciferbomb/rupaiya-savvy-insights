@@ -12,6 +12,7 @@ import SavingRecommendations from './SavingRecommendations';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { TableHead, TableRow, TableHeader, TableCell, TableBody, Table } from '@/components/ui/table';
+import { Button } from '@/components/ui/button';
 import { Calendar, Download } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
